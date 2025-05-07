@@ -107,6 +107,21 @@ from ultralytics.utils.export import export_engine, export_onnx
 from ultralytics.utils.files import file_size, spaces_in_path
 from ultralytics.utils.ops import Profile, nms_rotated
 from ultralytics.utils.torch_utils import TORCH_1_13, get_latest_opset, select_device
+from torch import nn 
+
+class ExportModel(nn.Module):
+    def __init__(self, yolo, target='TRT'):
+        super(ExportModel, self).__init__()
+        self.target = target
+        self.yolomodel = yolo
+    
+    def forward(self, x):
+        if self.target == 'TRT':
+            x = x.type(torch.float)
+            x = x.permute(0,3,1,2)  #NHWC to NCHW
+        x = x/255.0             #preproc layers
+        x = x[:, [2,1,0]]       #bgr2rgb
+        return self.yolomodel(x)
 
 
 def export_formats():
@@ -559,21 +574,24 @@ class Exporter:
         output_names = ["output0", "output1"] if isinstance(self.model, SegmentationModel) else ["output0"]
         dynamic = self.args.dynamic
         if dynamic:
-            dynamic = {"images": {0: "batch", 2: "height", 3: "width"}}  # shape(1,3,640,640)
+            dynamic = {"images": {0: "batch"}} #, 2: "height", 3: "width"}}  # shape(1,3,640,640)
             if isinstance(self.model, SegmentationModel):
                 dynamic["output0"] = {0: "batch", 2: "anchors"}  # shape(1, 116, 8400)
                 dynamic["output1"] = {0: "batch", 2: "mask_height", 3: "mask_width"}  # shape(1,32,160,160)
             elif isinstance(self.model, DetectionModel):
-                dynamic["output0"] = {0: "batch", 2: "anchors"}  # shape(1, 84, 8400)
+                dynamic["output0"] = {0: "batch"} #, 2: "anchors"}  # shape(1, 84, 8400)
             if self.args.nms:  # only batch size is dynamic with NMS
                 dynamic["output0"].pop(2)
         if self.args.nms and self.model.task == "obb":
             self.args.opset = opset_version  # for NMSModel
 
+        _model = ExportModel(yolo=self.model.cpu() if dynamic else self.model)
+        _im = self.im.permute(0,2,3,1).type(torch.uint8)
+
         with arange_patch(self.args):
             export_onnx(
-                NMSModel(self.model, self.args) if self.args.nms else self.model,
-                self.im,
+                NMSModel(_model, self.args) if self.args.nms else _model,
+                _im,
                 f,
                 opset=opset_version,
                 input_names=["images"],
